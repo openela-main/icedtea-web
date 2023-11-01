@@ -1,0 +1,735 @@
+diff --git a/Makefile.am b/Makefile.am
+index 3f73cff7..1112bf49 100644
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -956,10 +956,10 @@ if ENABLE_NATIVE_LAUNCHERS
+ # there is curently harecoded sh, so it can somehow basically work
+ # see the DESKTOP_SUFFIX for final tuning
+ launcher.build/$(javaws) launcher.build/$(itweb_settings) launcher.build/$(policyeditor): rust-launcher/src/main.rs rust-launcher/Cargo.toml
+-	export ITW_TMP_REPLACEMENT=$(TESTS_DIR)/rust_tests_tmp ; \
+-	mkdir -p $$ITW_TMP_REPLACEMENT; \
+ 	filename=`basename $@` ; \
+ 	type=$${filename%.*} ; \
++	export ITW_TMP_REPLACEMENT=$(TESTS_DIR)/rust_tests_tmp/$$type ; \
++	mkdir -p $$ITW_TMP_REPLACEMENT; \
+ 	srcs=$(TOP_SRC_DIR)/rust-launcher ; \
+ 	outs=$(TOP_BUILD_DIR)/launcher.in.$$type  ; \
+ 	mkdir -p launcher.build  ; \
+diff --git a/configure.ac b/configure.ac
+index 5bcb1046..03796e39 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -71,7 +71,7 @@ AM_CONDITIONAL([ENABLE_NATIVE_LAUNCHERS], [test ! x"$RUSTC" = x -a ! x"$CARGO" =
+ build_linux=no
+ build_windows=no
+ case "${host_os}" in
+-    linux*)
++    linux*|freebsd*)
+         build_linux=yes
+         ;;
+     cygwin*)
+diff --git a/netx/net/sourceforge/jnlp/Launcher.java b/netx/net/sourceforge/jnlp/Launcher.java
+index bcfd7b34..1ff42421 100644
+--- a/netx/net/sourceforge/jnlp/Launcher.java
++++ b/netx/net/sourceforge/jnlp/Launcher.java
+@@ -552,7 +552,7 @@ public class Launcher {
+             }
+ 
+             OutputController.getLogger().log(OutputController.Level.ERROR_ALL, "Starting application [" + mainName + "] ...");
+-            
++
+             Class<?> mainClass = app.getClassLoader().loadClass(mainName);
+ 
+             Method main = mainClass.getMethod("main", new Class<?>[] { String[].class });
+@@ -572,6 +572,7 @@ public class Launcher {
+ 
+             main.setAccessible(true);
+ 
++            JNLPRuntime.addStartupTrackingEntry("invoking main()");
+             OutputController.getLogger().log("Invoking main() with args: " + Arrays.toString(args));
+             main.invoke(null, new Object[] { args });
+ 
+diff --git a/netx/net/sourceforge/jnlp/OptionsDefinitions.java b/netx/net/sourceforge/jnlp/OptionsDefinitions.java
+index c87b4a79..16ef46d3 100644
+--- a/netx/net/sourceforge/jnlp/OptionsDefinitions.java
++++ b/netx/net/sourceforge/jnlp/OptionsDefinitions.java
+@@ -78,6 +78,7 @@ public class OptionsDefinitions {
+         JNLP("-jnlp","BOJnlp", NumberOfArguments.ONE),
+         HTML("-html","BOHtml", NumberOfArguments.ONE_OR_MORE),
+         BROWSER("-browser", "BrowserArg", NumberOfArguments.ONE_OR_MORE),
++        STARTUP_TRACKER("-startuptracker","BOStartupTracker"),
+         //itweb settings
+         LIST("-list", "IBOList"),
+         GET("-get", "name", "IBOGet", NumberOfArguments.ONE_OR_MORE),
+@@ -222,7 +223,8 @@ public class OptionsDefinitions {
+             OPTIONS.TRUSTNONE,
+             OPTIONS.JNLP,
+             OPTIONS.HTML,
+-            OPTIONS.BROWSER
++            OPTIONS.BROWSER,
++            OPTIONS.STARTUP_TRACKER
+         });
+     }
+ 
+diff --git a/netx/net/sourceforge/jnlp/cache/CacheEntry.java b/netx/net/sourceforge/jnlp/cache/CacheEntry.java
+index 3a241acb..c5f1f329 100644
+--- a/netx/net/sourceforge/jnlp/cache/CacheEntry.java
++++ b/netx/net/sourceforge/jnlp/cache/CacheEntry.java
+@@ -47,6 +47,8 @@ public class CacheEntry {
+     /** info about the cached file */
+     private final PropertiesFile properties;
+ 
++    private File localFile;
++
+     /**
+      * Create a CacheEntry for the resources specified as a remote
+      * URL.
+@@ -58,8 +60,8 @@ public class CacheEntry {
+         this.location = location;
+         this.version = version;
+         
+-        File infoFile = CacheUtil.getCacheFile(location, version);
+-        infoFile = new File(infoFile.getPath() + CacheDirectory.INFO_SUFFIX); // replace with something that can't be clobbered
++        this.localFile = CacheUtil.getCacheFile(location, version);
++        File infoFile = new File(localFile.getPath() + CacheDirectory.INFO_SUFFIX); // replace with something that can't be clobbered
+ 
+         properties = new PropertiesFile(infoFile, R("CAutoGen"));
+     }
+@@ -130,7 +132,11 @@ public class CacheEntry {
+      * @return whether the cache contains the version
+      */
+     public boolean isCurrent(long lastModified) {
+-        boolean cached = isCached();
++        return isCurrent(lastModified, null);
++    }
++
++    public boolean isCurrent(long lastModified, File cachedFile) {
++        boolean cached = isCached(cachedFile);
+         OutputController.getLogger().log("isCurrent:isCached " + cached);
+ 
+         if (!cached) {
+@@ -153,7 +159,16 @@ public class CacheEntry {
+      * @return true if the resource is in the cache
+      */
+     public boolean isCached() {
+-        File localFile = getCacheFile();
++        return isCached(null);
++    }
++
++    public boolean isCached(File cachedFile) {
++        final File localFile;
++        if (null == version && null != cachedFile) {
++            localFile = cachedFile;
++        } else {
++            localFile = getCacheFile();
++        }
+         if (!localFile.exists())
+             return false;
+ 
+@@ -224,4 +239,7 @@ public class CacheEntry {
+         return properties.isHeldByCurrentThread();
+     }
+ 
++    public File getLocalFile() {
++        return localFile;
++    }
+ }
+diff --git a/netx/net/sourceforge/jnlp/cache/CacheUtil.java b/netx/net/sourceforge/jnlp/cache/CacheUtil.java
+index 486421b9..d298d203 100644
+--- a/netx/net/sourceforge/jnlp/cache/CacheUtil.java
++++ b/netx/net/sourceforge/jnlp/cache/CacheUtil.java
+@@ -422,14 +422,13 @@ public class CacheUtil {
+      * @return whether the cache contains the version
+      * @throws IllegalArgumentException if the source is not cacheable
+      */
+-    public static boolean isCurrent(URL source, Version version, long lastModifed) {
++    public static boolean isCurrent(URL source, Version version, long lastModifed, CacheEntry entry, File cachedFile) {
+ 
+         if (!isCacheable(source, version))
+             throw new IllegalArgumentException(R("CNotCacheable", source));
+ 
+         try {
+-            CacheEntry entry = new CacheEntry(source, version); // could pool this
+-            boolean result = entry.isCurrent(lastModifed);
++            boolean result = entry.isCurrent(lastModifed, cachedFile);
+ 
+             OutputController.getLogger().log("isCurrent: " + source + " = " + result);
+ 
+@@ -796,6 +795,8 @@ public class CacheUtil {
+             }
+             URL undownloaded[] = urlList.toArray(new URL[urlList.size()]);
+ 
++            final int maxUrls = Integer.parseInt(JNLPRuntime.getConfiguration().getProperty(DeploymentConfiguration.KEY_MAX_URLS_DOWNLOAD_INDICATOR));
++
+             listener = indicator.getListener(app, title, undownloaded);
+ 
+             do {
+@@ -810,20 +811,30 @@ public class CacheUtil {
+ 
+                 int percent = (int) ((100 * read) / Math.max(1, total));
+ 
++                int urlCounter = 0;
+                 for (URL url : undownloaded) {
++                    if (urlCounter > maxUrls) {
++                        break;
++                    }
+                     listener.progress(url, "version",
+                                       tracker.getAmountRead(url),
+                                       tracker.getTotalSize(url),
+                                       percent);
++                    urlCounter += 1;
+                 }
+             } while (!tracker.waitForResources(resources, indicator.getUpdateRate()));
+ 
+             // make sure they read 100% until indicator closes
++            int urlCounter = 0;
+             for (URL url : undownloaded) {
++                if (urlCounter > maxUrls) {
++                    break;
++                }
+                 listener.progress(url, "version",
+                                   tracker.getTotalSize(url),
+                                   tracker.getTotalSize(url),
+                                   100);
++                urlCounter += 1;
+             }
+         } catch (InterruptedException ex) {
+             OutputController.getLogger().log(ex);
+diff --git a/netx/net/sourceforge/jnlp/cache/CachedDaemonThreadPoolProvider.java b/netx/net/sourceforge/jnlp/cache/CachedDaemonThreadPoolProvider.java
+index 1cd4df23..ff48662d 100644
+--- a/netx/net/sourceforge/jnlp/cache/CachedDaemonThreadPoolProvider.java
++++ b/netx/net/sourceforge/jnlp/cache/CachedDaemonThreadPoolProvider.java
+@@ -36,9 +36,14 @@
+  exception statement from your version. */
+ package net.sourceforge.jnlp.cache;
+ 
++import net.sourceforge.jnlp.config.DeploymentConfiguration;
++import net.sourceforge.jnlp.runtime.JNLPRuntime;
++
+ import java.util.concurrent.ExecutorService;
+-import java.util.concurrent.Executors;
++import java.util.concurrent.LinkedBlockingQueue;
+ import java.util.concurrent.ThreadFactory;
++import java.util.concurrent.ThreadPoolExecutor;
++import java.util.concurrent.TimeUnit;
+ import java.util.concurrent.atomic.AtomicInteger;
+ 
+ public class CachedDaemonThreadPoolProvider {
+@@ -81,6 +86,19 @@ public class CachedDaemonThreadPoolProvider {
+         }
+     }
+ 
+-    public static final ExecutorService DAEMON_THREAD_POOL = Executors.newCachedThreadPool(new DaemonThreadFactory());
++    public static synchronized ExecutorService getThreadPool() {
++        if (null == DAEMON_THREAD_POOL) {
++            final int nThreads = Integer.parseInt(JNLPRuntime.getConfiguration().getProperty(DeploymentConfiguration.KEY_BACKGROUND_THREADS_COUNT));
++            ThreadPoolExecutor pool = new ThreadPoolExecutor(nThreads, nThreads,
++                    60L, TimeUnit.SECONDS,
++                    new LinkedBlockingQueue<Runnable>(),
++                    new DaemonThreadFactory());
++            pool.allowCoreThreadTimeOut(true);
++            DAEMON_THREAD_POOL = pool;
++        }
++        return DAEMON_THREAD_POOL;
++    }
++
++    private static ExecutorService DAEMON_THREAD_POOL = null;
+ 
+ }
+diff --git a/netx/net/sourceforge/jnlp/cache/ResourceDownloader.java b/netx/net/sourceforge/jnlp/cache/ResourceDownloader.java
+index 643b46fd..e0a123bb 100644
+--- a/netx/net/sourceforge/jnlp/cache/ResourceDownloader.java
++++ b/netx/net/sourceforge/jnlp/cache/ResourceDownloader.java
+@@ -153,7 +153,12 @@ public class ResourceDownloader implements Runnable {
+             URLConnection connection = ConnectionFactory.getConnectionFactory().openConnection(location.URL); // this won't change so should be okay not-synchronized
+             connection.addRequestProperty("Accept-Encoding", "pack200-gzip, gzip");
+ 
+-            File localFile = CacheUtil.getCacheFile(resource.getLocation(), resource.getDownloadVersion());
++            File localFile = null;
++            if (resource.getRequestVersion() == resource.getDownloadVersion()) {
++                localFile = entry.getLocalFile();
++            } else {
++                localFile = CacheUtil.getCacheFile(resource.getLocation(), resource.getDownloadVersion());
++            }
+             Long size = location.length;
+             if (size == null) {
+                 size = connection.getContentLengthLong();
+@@ -162,7 +167,7 @@ public class ResourceDownloader implements Runnable {
+             if (lm == null) {
+                 lm = connection.getLastModified();
+             }
+-            boolean current = CacheUtil.isCurrent(resource.getLocation(), resource.getRequestVersion(), lm) && resource.getUpdatePolicy() != UpdatePolicy.FORCE;
++            boolean current = CacheUtil.isCurrent(resource.getLocation(), resource.getRequestVersion(), lm, entry, localFile) && resource.getUpdatePolicy() != UpdatePolicy.FORCE;
+             if (!current) {
+                 if (entry.isCached()) {
+                     entry.markForDelete();
+diff --git a/netx/net/sourceforge/jnlp/cache/ResourceTracker.java b/netx/net/sourceforge/jnlp/cache/ResourceTracker.java
+index f4ad69be..972a10cf 100644
+--- a/netx/net/sourceforge/jnlp/cache/ResourceTracker.java
++++ b/netx/net/sourceforge/jnlp/cache/ResourceTracker.java
+@@ -28,10 +28,7 @@ import static net.sourceforge.jnlp.cache.Resource.Status.PROCESSING;
+ import java.io.File;
+ import java.net.MalformedURLException;
+ import java.net.URL;
+-import java.util.ArrayList;
+-import java.util.Collection;
+-import java.util.EnumSet;
+-import java.util.List;
++import java.util.*;
+ 
+ import net.sourceforge.jnlp.DownloadOptions;
+ import net.sourceforge.jnlp.Version;
+@@ -105,6 +102,7 @@ public class ResourceTracker {
+ 
+     /** the resources known about by this resource tracker */
+     private final List<Resource> resources = new ArrayList<>();
++    private final HashMap<String, Resource> resourcesMap = new HashMap<>();
+ 
+     /** download listeners for this tracker */
+     private final List<DownloadListener> listeners = new ArrayList<>();
+@@ -155,6 +153,7 @@ public class ResourceTracker {
+                 return;
+             resource.addTracker(this);
+             resources.add(resource);
++            resourcesMap.put(location.toString(), resource);
+         }
+ 
+         if (options == null) {
+@@ -190,6 +189,7 @@ public class ResourceTracker {
+ 
+             if (resource != null) {
+                 resources.remove(resource);
++                resourcesMap.remove(location.toString());
+                 resource.removeTracker(this);
+             }
+ 
+@@ -508,7 +508,7 @@ public class ResourceTracker {
+      * @param resource  resource to be download
+      */
+     protected void startDownloadThread(Resource resource) {
+-        CachedDaemonThreadPoolProvider.DAEMON_THREAD_POOL.execute(new ResourceDownloader(resource, lock));
++        CachedDaemonThreadPoolProvider.getThreadPool().execute(new ResourceDownloader(resource, lock));
+     }
+ 
+     static Resource selectByFilter(Collection<Resource> source, Filter<Resource> filter) {
+@@ -569,6 +569,12 @@ public class ResourceTracker {
+      */
+     private Resource getResource(URL location) {
+         synchronized (resources) {
++            if (null != location) {
++                Resource res = resourcesMap.get(location.toString());
++                if (null != res && UrlUtils.urlEquals(res.getLocation(), location)) {
++                    return res;
++                }
++            }
+             for (Resource resource : resources) {
+                 if (UrlUtils.urlEquals(resource.getLocation(), location))
+                     return resource;
+diff --git a/netx/net/sourceforge/jnlp/config/Defaults.java b/netx/net/sourceforge/jnlp/config/Defaults.java
+index 8e316e4f..78f9b3e6 100644
+--- a/netx/net/sourceforge/jnlp/config/Defaults.java
++++ b/netx/net/sourceforge/jnlp/config/Defaults.java
+@@ -466,6 +466,21 @@ public class Defaults {
+                         BasicValueValidators.getRangedIntegerValidator(0, 1000),
+                         String.valueOf(10)// treshold when applet is considered as too small
+                 },
++                {
++                        DeploymentConfiguration.KEY_ENABLE_CACHE_FSYNC,
++                        BasicValueValidators.getBooleanValidator(),
++                        String.valueOf(false)
++                },
++                {
++                        DeploymentConfiguration.KEY_BACKGROUND_THREADS_COUNT,
++                        BasicValueValidators.getRangedIntegerValidator(1, 16),
++                        String.valueOf(3)
++                },
++                {
++                        DeploymentConfiguration.KEY_MAX_URLS_DOWNLOAD_INDICATOR,
++                        BasicValueValidators.getRangedIntegerValidator(1, 1024),
++                        String.valueOf(16)
++                },
+                 //**************
+                 //* Native (rust) only - beggin
+                 //**************
+diff --git a/netx/net/sourceforge/jnlp/config/DeploymentConfiguration.java b/netx/net/sourceforge/jnlp/config/DeploymentConfiguration.java
+index de7425e3..84f77075 100644
+--- a/netx/net/sourceforge/jnlp/config/DeploymentConfiguration.java
++++ b/netx/net/sourceforge/jnlp/config/DeploymentConfiguration.java
+@@ -250,7 +250,10 @@ public final class DeploymentConfiguration {
+     public static final String KEY_SMALL_SIZE_OVERRIDE_TRESHOLD = "deployment.small.size.treshold";
+     public static final String KEY_SMALL_SIZE_OVERRIDE_WIDTH = "deployment.small.size.override.width";
+     public static final String KEY_SMALL_SIZE_OVERRIDE_HEIGHT = "deployment.small.size.override.height";
+-    
++    public static final String KEY_ENABLE_CACHE_FSYNC = "deployment.enable.cache.fsync";
++    public static final String KEY_BACKGROUND_THREADS_COUNT = "deployment.background.threads.count";
++    public static final String KEY_MAX_URLS_DOWNLOAD_INDICATOR = "deployment.max.urls.download.indicator";
++
+     public static final String TRANSFER_TITLE = "Legacy configuration and cache found. Those will be now transported to new locations";
+     
+     private ConfigurationException loadingException = null;
+diff --git a/netx/net/sourceforge/jnlp/resources/Messages.properties b/netx/net/sourceforge/jnlp/resources/Messages.properties
+index 773f134b..0e87bce3 100644
+--- a/netx/net/sourceforge/jnlp/resources/Messages.properties
++++ b/netx/net/sourceforge/jnlp/resources/Messages.properties
+@@ -357,6 +357,7 @@ BXoffline   = Prevent ITW network connection. Only cache will be used. Applicati
+ BOHelp1     = Prints out information about supported command and basic usage.
+ BOHelp2     = Prints out information about supported command and basic usage. Can also take an parameter, and then it prints detailed help for this command.
+ BOTrustnone = Instead of asking user, will foretold all answers as no.
++BOStartupTracker = Enable startup time tracker
+ 
+ # Itweb-settings boot commands
+ IBOList=Shows a list of all the IcedTea-Web settings and their current values.
+diff --git a/netx/net/sourceforge/jnlp/runtime/Boot.java b/netx/net/sourceforge/jnlp/runtime/Boot.java
+index 7317b989..a9990909 100644
+--- a/netx/net/sourceforge/jnlp/runtime/Boot.java
++++ b/netx/net/sourceforge/jnlp/runtime/Boot.java
+@@ -107,6 +107,10 @@ public final class Boot implements PrivilegedAction<Void> {
+ 
+         optionParser = new OptionParser(argsIn, OptionsDefinitions.getJavaWsOptions());
+ 
++        if (optionParser.hasOption(OptionsDefinitions.OPTIONS.STARTUP_TRACKER)) {
++            JNLPRuntime.initStartupTracker();
++        }
++
+         if (optionParser.hasOption(OptionsDefinitions.OPTIONS.VERBOSE)) {
+             JNLPRuntime.setDebug(true);
+         }
+diff --git a/netx/net/sourceforge/jnlp/runtime/CachedJarFileCallback.java b/netx/net/sourceforge/jnlp/runtime/CachedJarFileCallback.java
+index 9746f5d0..811d132e 100644
+--- a/netx/net/sourceforge/jnlp/runtime/CachedJarFileCallback.java
++++ b/netx/net/sourceforge/jnlp/runtime/CachedJarFileCallback.java
+@@ -43,6 +43,7 @@ import java.io.FileOutputStream;
+ import java.io.IOException;
+ import java.io.InputStream;
+ import java.io.OutputStream;
++import java.net.URISyntaxException;
+ import java.net.URL;
+ import java.net.URLConnection;
+ import java.security.AccessController;
+@@ -103,9 +104,11 @@ final class CachedJarFileCallback implements URLJarFileCallBack {
+ 
+         if (UrlUtils.isLocalFile(localUrl)) {
+             // if it is known to us, just return the cached file
+-            JarFile returnFile = new JarFile(localUrl.getPath());
++            JarFile returnFile=null;
+             
+             try {
++            	localUrl.toURI().getPath();
++            	returnFile = new JarFile(localUrl.toURI().getPath());
+                 
+                 // Blank out the class-path because:
+                 // 1) Web Start does not support it
+@@ -117,6 +120,8 @@ final class CachedJarFileCallback implements URLJarFileCallBack {
+ 
+             } catch (NullPointerException npe) {
+                 // Discard NPE here. Maybe there was no manifest, maybe there were no attributes, etc.
++			} catch (URISyntaxException e) {
++				// should not happen as localUrl was built using localFile.toURI().toURL(), see JNLPClassLoader.activateJars(List<JARDesc>)
+             }
+ 
+             return returnFile;
+diff --git a/netx/net/sourceforge/jnlp/runtime/JNLPClassLoader.java b/netx/net/sourceforge/jnlp/runtime/JNLPClassLoader.java
+index 3785707a..77576fdd 100644
+--- a/netx/net/sourceforge/jnlp/runtime/JNLPClassLoader.java
++++ b/netx/net/sourceforge/jnlp/runtime/JNLPClassLoader.java
+@@ -709,7 +709,9 @@ public class JNLPClassLoader extends URLClassLoader {
+             fillInPartJars(initialJars); // add in each initial part's lazy jars
+         }
+ 
++        JNLPRuntime.addStartupTrackingEntry("JARs download enter");
+         waitForJars(initialJars); //download the jars first.
++        JNLPRuntime.addStartupTrackingEntry("JARs download complete");
+ 
+         //A ZipException will propagate later on if the jar is invalid and not checked here
+         if (shouldFilterInvalidJars()) {
+diff --git a/netx/net/sourceforge/jnlp/runtime/JNLPRuntime.java b/netx/net/sourceforge/jnlp/runtime/JNLPRuntime.java
+index 295744db..919f78fd 100644
+--- a/netx/net/sourceforge/jnlp/runtime/JNLPRuntime.java
++++ b/netx/net/sourceforge/jnlp/runtime/JNLPRuntime.java
+@@ -170,6 +170,7 @@ public class JNLPRuntime {
+ 
+     private static Boolean onlineDetected = null;
+ 
++    private static long startupTrackerMoment = 0;
+ 
+     /** 
+      * Header is not checked and so eg
+@@ -891,6 +892,19 @@ public class JNLPRuntime {
+         JNLPRuntime.ignoreHeaders = ignoreHeaders;
+     }
+ 
++    // may only be called from Boot
++    public static void initStartupTracker() {
++        startupTrackerMoment = System.currentTimeMillis();
++    }
++
++    public static void addStartupTrackingEntry(String message) {
++        if (startupTrackerMoment > 0) {
++            long time = (System.currentTimeMillis() - startupTrackerMoment)/1000;
++            String msg = "Startup tracker: seconds elapsed: [" + time + "], message: [" + message + "]";
++            OutputController.getLogger().log(OutputController.Level.ERROR_ALL, msg);
++        }
++    }
++
+     private static boolean isPluginDebug() {
+         if (pluginDebug == null) {
+             try {
+diff --git a/netx/net/sourceforge/jnlp/tools/JarCertVerifier.java b/netx/net/sourceforge/jnlp/tools/JarCertVerifier.java
+index eb26dc69..7fd5d92f 100644
+--- a/netx/net/sourceforge/jnlp/tools/JarCertVerifier.java
++++ b/netx/net/sourceforge/jnlp/tools/JarCertVerifier.java
+@@ -39,15 +39,18 @@ import java.util.Enumeration;
+ import java.util.HashMap;
+ import java.util.List;
+ import java.util.Map;
+-import java.util.Vector;
++import java.util.concurrent.Callable;
++import java.util.concurrent.Future;
+ import java.util.jar.JarEntry;
+ import java.util.regex.Pattern;
+ 
+ import net.sourceforge.jnlp.JARDesc;
+ import net.sourceforge.jnlp.JNLPFile;
+ import net.sourceforge.jnlp.LaunchException;
++import net.sourceforge.jnlp.cache.CachedDaemonThreadPoolProvider;
+ import net.sourceforge.jnlp.cache.ResourceTracker;
+ import net.sourceforge.jnlp.runtime.JNLPClassLoader.SecurityDelegate;
++import net.sourceforge.jnlp.runtime.JNLPRuntime;
+ import net.sourceforge.jnlp.security.AppVerifier;
+ import net.sourceforge.jnlp.security.CertVerifier;
+ import net.sourceforge.jnlp.security.CertificateUtils;
+@@ -226,37 +229,36 @@ public class JarCertVerifier implements CertVerifier {
+     private void verifyJars(List<JARDesc> jars, ResourceTracker tracker)
+             throws Exception {
+ 
++        List<String> filesToVerify = new ArrayList<>();
+         for (JARDesc jar : jars) {
++            File jarFile = tracker.getCacheFile(jar.getLocation());
+ 
+-            try {
+-
+-                File jarFile = tracker.getCacheFile(jar.getLocation());
+-
+-                // some sort of resource download/cache error. Nothing to add
+-                // in that case ... but don't fail here
+-                if (jarFile == null) {
+-                    continue;
+-                }
++            // some sort of resource download/cache error. Nothing to add
++            // in that case ... but don't fail here
++            if (jarFile == null) {
++                continue;
++            }
+ 
+-                String localFile = jarFile.getAbsolutePath();
+-                if (verifiedJars.contains(localFile)
+-                        || unverifiedJars.contains(localFile)) {
+-                    continue;
+-                }
++            String localFile = jarFile.getAbsolutePath();
++            if (verifiedJars.contains(localFile)
++                    || unverifiedJars.contains(localFile)) {
++                continue;
++            }
+ 
+-                VerifyResult result = verifyJar(localFile);
++            filesToVerify.add(localFile);
++        }
+ 
+-                if (result == VerifyResult.UNSIGNED) {
+-                    unverifiedJars.add(localFile);
+-                } else if (result == VerifyResult.SIGNED_NOT_OK) {
+-                    verifiedJars.add(localFile);
+-                } else if (result == VerifyResult.SIGNED_OK) {
+-                    verifiedJars.add(localFile);
+-                }
+-            } catch (Exception e) {
+-                // We may catch exceptions from using verifyJar()
+-                // or from checkTrustedCerts
+-                throw e;
++        List<VerifiedJarFile> verified = verifyJarsParallel(filesToVerify);
++
++        for (VerifiedJarFile vjf : verified) {
++            VerifyResult result = verifyJarEntryCerts(vjf.file, vjf.hasManifest, vjf.entriesVec);
++            String localFile = vjf.file;
++            if (result == VerifyResult.UNSIGNED) {
++                unverifiedJars.add(localFile);
++            } else if (result == VerifyResult.SIGNED_NOT_OK) {
++                verifiedJars.add(localFile);
++            } else if (result == VerifyResult.SIGNED_OK) {
++                verifiedJars.add(localFile);
+             }
+         }
+ 
+@@ -264,6 +266,31 @@ public class JarCertVerifier implements CertVerifier {
+             checkTrustedCerts(certPath);
+     }
+ 
++    private List<VerifiedJarFile> verifyJarsParallel(List<String> files) throws Exception {
++        JNLPRuntime.addStartupTrackingEntry("JARs verification enter");
++        List<Callable<VerifiedJarFile>> callables = new ArrayList<>(files.size());
++        for (final String fi : files) {
++            callables.add(new Callable<VerifiedJarFile>() {
++                @Override
++                public VerifiedJarFile call() throws Exception {
++                    return verifyJar(fi);
++                }
++            });
++        }
++        List<Future<VerifiedJarFile>> futures = CachedDaemonThreadPoolProvider.getThreadPool().invokeAll(callables);
++        List<VerifiedJarFile> results = new ArrayList<>(files.size());
++        try {
++            for (Future<VerifiedJarFile> fu : futures) {
++                results.add(fu.get());
++            }
++        } catch (Exception e) {
++            OutputController.getLogger().log(OutputController.Level.ERROR_ALL, e);
++            throw e;
++        }
++        JNLPRuntime.addStartupTrackingEntry("JARs verification complete");
++        return results;
++    }
++
+     /**
+      * Checks through all the jar entries of jarName for signers, storing all the common ones in the certs hash map.
+      * 
+@@ -273,15 +300,15 @@ public class JarCertVerifier implements CertVerifier {
+      * @throws Exception
+      *             Will be thrown if there are any problems with the jar.
+      */
+-    private VerifyResult verifyJar(String jarName) throws Exception {
++    private VerifiedJarFile verifyJar(String jarName) throws Exception {
+         try (JarFile jarFile = new JarFile(jarName, true)) {
+-            Vector<JarEntry> entriesVec = new Vector<JarEntry>();
++            List<JarEntry> entriesVec = new ArrayList<>();
+             byte[] buffer = new byte[8192];
+ 
+             Enumeration<JarEntry> entries = jarFile.entries();
+             while (entries.hasMoreElements()) {
+                 JarEntry je = entries.nextElement();
+-                entriesVec.addElement(je);
++                entriesVec.add(je);
+ 
+                 InputStream is = jarFile.getInputStream(je);
+                 try {
+@@ -295,8 +322,7 @@ public class JarCertVerifier implements CertVerifier {
+                     }
+                 }
+             }
+-            return verifyJarEntryCerts(jarName, jarFile.getManifest() != null,
+-                    entriesVec);
++            return new VerifiedJarFile(jarName, null != jarFile.getManifest(), entriesVec);
+ 
+         } catch (Exception e) {
+             OutputController.getLogger().log(OutputController.Level.ERROR_ALL, e);
+@@ -318,7 +344,7 @@ public class JarCertVerifier implements CertVerifier {
+      *             Will be thrown if there are issues with entries.
+      */
+     VerifyResult verifyJarEntryCerts(String jarName, boolean jarHasManifest,
+-            Vector<JarEntry> entries) throws Exception {
++            List<JarEntry> entries) throws Exception {
+         // Contains number of entries the cert with this CertPath has signed.
+         Map<CertPath, Integer> jarSignCount = new HashMap<>();
+         int numSignableEntriesInJar = 0;
+@@ -629,4 +655,16 @@ public class JarCertVerifier implements CertVerifier {
+         }
+         return sum;
+     }
++
++    private static class VerifiedJarFile {
++        final String file;
++        final boolean hasManifest;
++        private final List<JarEntry> entriesVec;
++
++        private VerifiedJarFile(String file, boolean hasManifest, List<JarEntry> entriesVec) {
++            this.file = file;
++            this.hasManifest = hasManifest;
++            this.entriesVec = entriesVec;
++        }
++    }
+ }
+diff --git a/netx/net/sourceforge/jnlp/util/PropertiesFile.java b/netx/net/sourceforge/jnlp/util/PropertiesFile.java
+index 2f0918f6..c399ef20 100644
+--- a/netx/net/sourceforge/jnlp/util/PropertiesFile.java
++++ b/netx/net/sourceforge/jnlp/util/PropertiesFile.java
+@@ -23,6 +23,8 @@ import java.io.IOException;
+ import java.io.InputStream;
+ import java.util.Properties;
+ 
++import net.sourceforge.jnlp.config.DeploymentConfiguration;
++import net.sourceforge.jnlp.runtime.JNLPRuntime;
+ import net.sourceforge.jnlp.util.lockingfile.LockedFile;
+ import net.sourceforge.jnlp.util.logging.OutputController;
+ 
+@@ -168,7 +170,9 @@ public class PropertiesFile extends Properties {
+                 store(s, header);
+ 
+                 // fsync()
+-                s.getChannel().force(true);
++                if (Boolean.parseBoolean(JNLPRuntime.getConfiguration().getProperty(DeploymentConfiguration.KEY_ENABLE_CACHE_FSYNC))) {
++                    s.getChannel().force(true);
++                }
+                 lastStore = file.lastModified();
+             } finally {
+                 if (s != null) s.close();
+diff --git a/tests/netx/unit/net/sourceforge/jnlp/runtime/CachedJarFileCallbackTest.java b/tests/netx/unit/net/sourceforge/jnlp/runtime/CachedJarFileCallbackTest.java
+new file mode 100644
+index 00000000..bc564db5
+--- /dev/null
++++ b/tests/netx/unit/net/sourceforge/jnlp/runtime/CachedJarFileCallbackTest.java
+@@ -0,0 +1,55 @@
++package net.sourceforge.jnlp.runtime;
++
++import java.io.File;
++import java.io.IOException;
++import java.net.URL;
++import java.net.URLEncoder;
++import java.nio.charset.StandardCharsets;
++import java.util.Arrays;
++import java.util.List;
++import java.util.jar.JarFile;
++
++import org.junit.After;
++import org.junit.Before;
++import org.junit.Test;
++
++import net.sourceforge.jnlp.util.FileTestUtils;
++import net.sourceforge.jnlp.util.FileUtils;
++
++public class CachedJarFileCallbackTest {
++	private File tempDirectory;
++
++	@Before
++	public void before() throws IOException {
++		tempDirectory = FileTestUtils.createTempDirectory();
++	}
++
++	@After
++	public void after() throws IOException {
++		FileUtils.recursiveDelete(tempDirectory, tempDirectory.getParentFile());
++	}
++
++	@Test
++	public void testRetrieve() throws Exception {
++		List<String> names = Arrays.asList("test1.0.jar", "test@1.0.jar");
++		
++		for (String name: names) {
++			// URL-encode the filename
++			name = URLEncoder.encode(name, StandardCharsets.UTF_8.name());
++			// create temp jar file
++			File jarFile = new File(tempDirectory, name);
++			FileTestUtils.createJarWithContents(jarFile /* no contents */);
++
++			// JNLPClassLoader.activateJars uses toUri().toURL() to get the local file URL
++			URL localUrl = jarFile.toURI().toURL();
++			URL remoteUrl = new URL("http://localhost/" + name);
++			// add jar to cache
++			CachedJarFileCallback cachedJarFileCallback = CachedJarFileCallback.getInstance();
++			cachedJarFileCallback.addMapping(remoteUrl, localUrl);
++			// retrieve from cache (throws exception if file not found)
++			try (JarFile fromCacheJarFile = cachedJarFileCallback.retrieve(remoteUrl)) {
++				// nothing to do, we just wanted to make sure that the local file existed
++			}
++		}
++	}
++}

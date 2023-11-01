@@ -1,0 +1,11 @@
+--- a/rust-launcher/cc.toml
++++ b/rust-launcher/Cargo.toml
+@@ -2,7 +2,3 @@
+ name = "launcher"
+ version = "1.8.0"
+ authors = ["https://icedtea.classpath.org/wiki/IcedTea-Web"]
+-
+-[dependencies]
+-[target.'cfg(windows)'.dependencies]
+-dunce = "0.1.1"
+
